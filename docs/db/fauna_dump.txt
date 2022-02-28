@@ -1,0 +1,381 @@
+[
+  {
+    data: [
+      {
+        ref: Collection("users"),
+        ts: 1623511322280000,
+        history_days: 30,
+        name: "users"
+      },
+      {
+        ref: Collection("relationships"),
+        ts: 1624018703120000,
+        history_days: 30,
+        name: "relationships"
+      },
+      {
+        ref: Collection("tweets"),
+        ts: 1624261813400000,
+        history_days: 30,
+        name: "tweets"
+      }
+    ]
+  },
+  {
+    data: [
+      {
+        ref: Index("Users_by_username"),
+        ts: 1623996823190000,
+        active: true,
+        serialized: true,
+        name: "Users_by_username",
+        source: Collection("users"),
+        terms: [
+          {
+            field: ["data", "username"]
+          }
+        ],
+        unique: true,
+        partitions: 1
+      },
+      {
+        ref: Index("Users_by_email"),
+        ts: 1624003055340000,
+        active: true,
+        serialized: true,
+        name: "Users_by_email",
+        permissions: {
+          read: "public"
+        },
+        source: Collection("users"),
+        terms: [
+          {
+            field: ["data", "email"]
+          }
+        ],
+        unique: true,
+        partitions: 1
+      },
+      {
+        ref: Index("Users_by_phone"),
+        ts: 1624003072320000,
+        active: true,
+        serialized: true,
+        name: "Users_by_phone",
+        permissions: {
+          read: "public"
+        },
+        source: Collection("users"),
+        terms: [
+          {
+            field: ["data", "phone"]
+          }
+        ],
+        unique: true,
+        partitions: 1
+      },
+      {
+        ref: Index("followees_by_follower"),
+        ts: 1624285641646000,
+        active: true,
+        serialized: true,
+        name: "followees_by_follower",
+        unique: true,
+        permissions: {
+          read: "public"
+        },
+        source: Collection("relationships"),
+        terms: [
+          {
+            field: ["data", "followee"]
+          }
+        ],
+        values: [
+          {
+            field: ["data", "follower"]
+          }
+        ],
+        partitions: 1
+      },
+      {
+        ref: Index("tweets_by_user"),
+        ts: 1624278850495000,
+        active: true,
+        serialized: false,
+        name: "tweets_by_user",
+        permissions: {
+          read: "public"
+        },
+        source: Collection("tweets"),
+        terms: [
+          {
+            field: ["data", "user"]
+          }
+        ],
+        unique: false,
+        partitions: 1
+      }
+    ]
+  },
+  {
+    data: [
+      {
+        ref: Ref(Ref("functions"), "UserExists"),
+        ts: 1624021691900000,
+        name: "UserExists",
+        body: Query(
+          Lambda(
+            ["user", "index"],
+            Exists(
+              Match(Index(Concat(["Users_by_", Var("index")], "")), Var("user"))
+            )
+          )
+        ),
+        role: "server"
+      },
+      {
+        ref: Ref(Ref("functions"), "getUser"),
+        ts: 1624342403550000,
+        name: "getUser",
+        body: Query(
+          Lambda(
+            ["user", "type"],
+            Select(
+              "ref",
+              Get(
+                Match(
+                  Index(Concat(["Users_by_", Var("type")], "")),
+                  Var("user")
+                )
+              )
+            )
+          )
+        )
+      },
+      {
+        ref: Ref(Ref("functions"), "AddTweet"),
+        ts: 1624280381130000,
+        name: "AddTweet",
+        body: Query(
+          Lambda(
+            "data",
+            If(
+              Equals(Select(["data", "user"], Var("data")), CurrentIdentity()),
+              Create(Collection("tweets"), Var("data")),
+              Abort(
+                "Malicious Request Found. The user used to tweet is not the same as current user."
+              )
+            )
+          )
+        )
+      },
+      {
+        ref: Ref(Ref("functions"), "GetTweetsOfAUser"),
+        ts: 1624283999250000,
+        name: "GetTweetsOfAUser",
+        body: Query(
+          Lambda(
+            "user",
+            If(
+              Call(Function("UserExists"), [Var("user"), "username"]),
+              Paginate(
+                Match(
+                  Index("tweets_by_user"),
+                  Call(Function("getUser"), Var("user"))
+                )
+              ),
+              Abort("This user does not exists")
+            )
+          )
+        )
+      },
+      {
+        ref: Ref(Ref("functions"), "DeleteTweet"),
+        ts: 1624280406970000,
+        name: "DeleteTweet",
+        body: Query(
+          Lambda(
+            "id",
+            If(
+              Equals(
+                Select(
+                  ["data", "user"],
+                  Get(Ref(Collection("tweets"), Var("id")))
+                ),
+                CurrentIdentity()
+              ),
+              Delete(Ref(Collection("tweets"), Var("id"))),
+              Abort("Malicious Request. The tweet belongs to another user.")
+            )
+          )
+        )
+      },
+      {
+        ref: Ref(Ref("functions"), "CreateRelationship"),
+        ts: 1624289936400000,
+        name: "CreateRelationship",
+        body: Query(
+          Lambda(
+            "userToFollow",
+            If(
+              IsEmpty(
+                Paginate(
+                  Match(Index("followees_by_follower"), CurrentIdentity())
+                )
+              ),
+              Create(Collection("relationships"), {
+                data: {
+                  followee: CurrentIdentity(),
+                  follower: Call(Function("getUser"), Var("userToFollow"))
+                }
+              }),
+              Map(
+                Paginate(
+                  Match(Index("followees_by_follower"), CurrentIdentity())
+                ),
+                Lambda(
+                  "followee",
+                  If(
+                    Equals(
+                      Call(Function("getUser"), Var("userToFollow")),
+                      Var("followee")
+                    ),
+                    Abort(
+                      Concat(["You Already Follow", Var("userToFollow")], " ")
+                    ),
+                    If(
+                      Call(Function("UserExists"), [
+                        Var("userToFollow"),
+                        "username"
+                      ]),
+                      Create(Collection("relationships"), {
+                        data: {
+                          followee: CurrentIdentity(),
+                          follower: Call(
+                            Function("getUser"),
+                            Var("userToFollow")
+                          )
+                        }
+                      }),
+                      Abort("The user you want to follow does not exists")
+                    )
+                  )
+                )
+              )
+            )
+          )
+        ),
+        role: Role("Users")
+      },
+      {
+        ref: Ref(Ref("functions"), "GetSingleTweet"),
+        ts: 1624285460660000,
+        name: "GetSingleTweet",
+        body: Query(Lambda("id", Get(Ref(Collection("tweets"), Var("id"))))),
+        role: Role("Users")
+      },
+      {
+        ref: Ref(Ref("functions"), "UserFeed"),
+        ts: 1624340331120000,
+        name: "UserFeed",
+        body: Query(
+          Lambda(
+            [],
+            Paginate(
+              Join(
+                Match(Index("followees_by_follower"), CurrentIdentity()),
+                Index("tweets_by_user")
+              )
+            )
+          )
+        ),
+        role: Role("Users")
+      },
+      {
+        ref: Ref(Ref("functions"), "LoginUser"),
+        ts: 1624345567185000,
+        name: "LoginUser",
+        body: Query(
+          Lambda(
+            ["id", "type", "password"],
+            If(
+              Call(Function("UserExists"), [Var("id"), Var("type")]),
+              {
+                user: Select(
+                  ["data"],
+                  Get(Call(Function("getUser"), [Var("id"), Var("type")]))
+                ),
+                secret: Select(
+                  ["secret"],
+                  Login(Call(Function("getUser"), [Var("id"), Var("type")]), {
+                    password: Var("password")
+                  })
+                )
+              },
+              Abort("Invalid Username or Password")
+            )
+          )
+        )
+      },
+      {
+        ref: Ref(Ref("functions"), "NewUser"),
+        ts: 1624350171775000,
+        name: "NewUser",
+        body: Query(
+          Lambda(
+            ["data", "password", "typeOfAuth"],
+            If(
+              Call(Function("UserExists"), [
+                Select("username", Var("data")),
+                "username"
+              ]),
+              Abort("Username is not available"),
+              If(
+                Call(Function("UserExists"), [
+                  Select("email", Var("data")),
+                  Var("typeOfAuth")
+                ]),
+                Abort("User Already Exists"),
+                {
+                  user: Select(
+                    "data",
+                    Create(Collection("users"), {
+                      data: Var("data"),
+                      credentials: { password: Var("password") }
+                    })
+                  ),
+                  secret: Select(
+                    "secret",
+                    Login(
+                      Call(Function("getUser"), [
+                        Select(Var("typeOfAuth"), Var("data")),
+                        Var("typeOfAuth")
+                      ]),
+                      { password: Var("password") }
+                    )
+                  )
+                }
+              )
+            )
+          )
+        )
+      },
+      {
+        ref: Ref(Ref("functions"), "DeleteRelationsship"),
+        ts: 1646032099520000,
+        name: "DeleteRelationsship",
+        body: Query(
+          Lambda(
+            "id",
+            If(
+              Exists(Ref(Collection("relationships"), "id")),
+              Delete(Ref(Collection("relationships"), "id")),
+              Abort("Relationship does not exist")
+            )
+          )
+        ),
+        role: Role("Users")
+      }
+    ]
+  }
+]
